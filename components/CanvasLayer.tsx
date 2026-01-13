@@ -12,7 +12,7 @@ interface CanvasLayerProps {
   setEditingId: (id: string | null) => void;
 }
 
-// Constants for physics interaction
+// --- Physics Constants ---
 const SMOOTH_ALPHA = 0.35;
 const HOLD_FRAMES = 6;
 const ROTATE_TARGET_DEG = 90;
@@ -33,33 +33,38 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
   onStatsUpdate,
   setEditingId
 }) => {
+  // --- DOM Refs ---
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   
-  // Offscreen canvases
+  // --- Offscreen Buffers (Performance Critical) ---
+  // feedCanvas: High Res, rotated, scaled (for Display)
   const feedCanvasRef = useRef<HTMLCanvasElement>(document.createElement('canvas'));
+  // analysisCanvas: Low Res, downsampled (for AI)
   const analysisCanvasRef = useRef<HTMLCanvasElement>(document.createElement('canvas'));
 
-  // Mutable state refs (to avoid re-renders during 60fps loop)
+  // --- Mutable High-Frequency State (No React Re-renders) ---
   const runtimeRef = useRef<Map<string, CircleRuntime>>(new Map());
   const prevLmsRef = useRef<Point[] | null>(null);
   const prevTipRef = useRef<Point | null>(null);
   const holdLeftRef = useRef<number>(0);
+  
+  // Loop Control
   const lastAnalyzeRef = useRef<number>(0);
   const nextAnalyzeDueRef = useRef<number>(0);
-  const draggingRef = useRef<{active: boolean, offset: Point}>({ active: false, offset: {x:0, y:0} });
-  const pulseRef = useRef<number>(0); 
-  const requestRef = useRef<number>(0); 
   const isAnalyzingRef = useRef<boolean>(false);
+  const requestRef = useRef<number>(0);
+  const pulseRef = useRef<number>(0); 
   
-  // Camera Streams
+  // Interaction
+  const draggingRef = useRef<{active: boolean, offset: Point}>({ active: false, offset: {x:0, y:0} });
+  const [draggingPointIndex, setDraggingPointIndex] = useState<number | null>(null);
+
+  // --- External Systems ---
   const activeStreamRef = useRef<MediaStream | null>(null);
   const handsRef = useRef<any>(null);
 
-  // Mapping State
-  const [draggingPointIndex, setDraggingPointIndex] = useState<number | null>(null);
-  
-  // Keep track of latest props in refs for the animation loop
+  // --- Sync Props to Refs (To access latest props in animation loop) ---
   const circlesRef = useRef(circles);
   const settingsRef = useRef(settings);
   const editingIdRef = useRef(editingId);
@@ -70,7 +75,7 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
   useEffect(() => { editingIdRef.current = editingId; }, [editingId]);
   useEffect(() => { backgroundImageRef.current = backgroundImage; }, [backgroundImage]);
 
-  // Sync Runtime State
+  // --- 1. Audio/Media Asset Management ---
   useEffect(() => {
     circles.forEach(c => {
       if (!runtimeRef.current.has(c.id)) {
@@ -95,7 +100,7 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
              ctx.drawImage(frame.buffer, 0, 0, rt.gifCanvas!.width, rt.gifCanvas!.height);
            }).then((anim: any) => {
              rt.gifAnim = anim;
-             anim.pause(); // Start paused
+             anim.pause(); 
            });
         } else {
            const img = new Image();
@@ -116,13 +121,11 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
         rt.audioEl = null;
       }
 
-      // Apply Volume
-      if (rt.audioEl) {
-          rt.audioEl.volume = c.volume ?? 1.0;
-      }
+      // Update Volume
+      if (rt.audioEl) rt.audioEl.volume = c.volume ?? 1.0;
     });
 
-    // Cleanup
+    // Garbage Collection
     const currentIds = new Set(circles.map(c => c.id));
     for (const id of runtimeRef.current.keys()) {
       if (!currentIds.has(id)) {
@@ -133,7 +136,7 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
     }
   }, [circles]);
 
-  // Audio Unlock
+  // --- 2. Audio Unlock ---
   useEffect(() => {
     const unlock = () => {
       const a = new Audio();
@@ -149,8 +152,7 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
     };
   }, []);
 
-  // --------------- Logic: Geometry & Physics ---------------- //
-
+  // --- 3. Physics Engine ---
   const updateCirclePhysics = (tip: Point | null, now: number) => {
     if (settingsRef.current.isMappingEdit) return;
 
@@ -220,6 +222,7 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
         }
       }
 
+      // State Transitions
       if (!rt.wasFilled && rt.isFilled) {
         if(rt.audioEl) {
            rt.audioEl.currentTime = rt._resumeTime || 0;
@@ -241,11 +244,12 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
     });
   };
 
+  // --- 4. Render Engine (UI Drawing) ---
   const draw = (ctx: CanvasRenderingContext2D, width: number, height: number, landmarks: any, tip: Point | null) => {
     const bgImg = backgroundImageRef.current;
     const s = settingsRef.current;
     
-    // Clear / Draw Background
+    // -- Background Layer --
     if (bgImg) {
         ctx.drawImage(bgImg, 0, 0, width, height);
     } else {
@@ -253,24 +257,26 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
         ctx.fillRect(0, 0, width, height);
     }
     
-    // Draw Camera Feed if enabled
+    // -- Camera Feed Layer --
     if (s.showCamera) {
       ctx.save();
       if (s.mirrorView) {
         ctx.translate(width, 0);
         ctx.scale(-1, 1);
       }
+      // Use the pre-processed feed canvas
       ctx.drawImage(feedCanvasRef.current, 0, 0, width, height);
       ctx.restore();
     }
 
+    // -- Circles Layer --
     ctx.save();
-    
     [...circlesRef.current].forEach(c => {
       const isEditing = c.id === editingIdRef.current;
       const rt = runtimeRef.current.get(c.id);
       if (!rt) return;
 
+      // Glow
       if (rt.isHandInside && !rt.isFilled) {
         ctx.shadowBlur = 20;
         ctx.shadowColor = c.color;
@@ -278,6 +284,7 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
         ctx.shadowBlur = 0;
       }
 
+      // Base Shape
       ctx.beginPath();
       ctx.arc(c.x, c.y, c.radius, 0, Math.PI * 2);
       
@@ -287,7 +294,6 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
         ctx.translate(c.x, c.y);
         ctx.scale(pulseScale, pulseScale);
         ctx.translate(-c.x, -c.y);
-        
         ctx.fillStyle = 'rgba(255,255,255,0.85)';
         ctx.fill();
         ctx.restore();
@@ -299,6 +305,7 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
 
       ctx.shadowBlur = 0;
 
+      // Progress Arc
       if (!rt.isFilled && rt.cwAccum > 5) {
          const progress = Math.min(rt.cwAccum / ROTATE_TARGET_DEG, 1);
          if (progress > 0) {
@@ -311,6 +318,7 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
          }
       }
 
+      // Media (Images/GIFs)
       if (rt.imgEl || rt.gifCanvas) {
         ctx.save();
         ctx.translate(c.x, c.y);
@@ -325,6 +333,7 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
         ctx.restore();
       }
 
+      // Editing Selection Ring
       if (isEditing) {
         ctx.strokeStyle = '#4cc9f0';
         ctx.lineWidth = 1;
@@ -335,37 +344,37 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
         ctx.setLineDash([]);
       }
     });
-
     ctx.restore();
 
+    // -- Skeleton Layer --
     if (landmarks && s.drawSkeleton) {
-        if (window.drawConnectors && window.drawLandmarks && window.Hands) {
-            ctx.save();
-            ctx.strokeStyle = '#4cc9f0';
-            ctx.lineWidth = 2;
-            ctx.fillStyle = '#00d1ff';
-            ctx.globalAlpha = 0.9;
-            
-            const connections = window.Hands.HAND_CONNECTIONS;
-            if (connections) {
-                for(const conn of connections) {
-                    const p1 = landmarks[conn[0]];
-                    const p2 = landmarks[conn[1]];
-                    ctx.beginPath();
-                    ctx.moveTo(p1.x * width, p1.y * height);
-                    ctx.lineTo(p2.x * width, p2.y * height);
-                    ctx.stroke();
-                }
-            }
-            for(const lm of landmarks) {
+         ctx.save();
+         ctx.strokeStyle = '#4cc9f0';
+         ctx.lineWidth = 2;
+         ctx.fillStyle = '#00d1ff';
+         ctx.globalAlpha = 0.9;
+         
+         const connections = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],[9,13],[13,14],[14,15],[15,16],[13,17],[17,18],[18,19],[19,20],[0,17]];
+         
+         for(const conn of connections) {
+             const p1 = landmarks[conn[0]];
+             const p2 = landmarks[conn[1]];
+             if(p1 && p2) {
                 ctx.beginPath();
-                ctx.arc(lm.x * width, lm.y * height, 3, 0, 2 * Math.PI);
-                ctx.fill();
-            }
-            ctx.restore();
-        }
+                ctx.moveTo(p1.x * width, p1.y * height);
+                ctx.lineTo(p2.x * width, p2.y * height);
+                ctx.stroke();
+             }
+         }
+         for(const lm of landmarks) {
+             ctx.beginPath();
+             ctx.arc(lm.x * width, lm.y * height, 3, 0, 2 * Math.PI);
+             ctx.fill();
+         }
+         ctx.restore();
     }
 
+    // -- Tip Pointer --
     if (tip) {
         ctx.save();
         const rOuter = 14, rInner = 9;
@@ -386,9 +395,9 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
         ctx.restore();
     }
 
+    // -- Mapping Mesh Overlay --
     if (s.isMappingEdit) {
         const points = s.mappingPoints;
-        
         ctx.save();
         ctx.strokeStyle = 'rgba(6, 182, 212, 0.5)';
         ctx.lineWidth = 2;
@@ -406,7 +415,6 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
         points.forEach((p, i) => {
             const px = p.x * width;
             const py = p.y * height;
-            
             ctx.beginPath();
             ctx.arc(px, py, 6, 0, Math.PI * 2);
             ctx.fillStyle = '#000';
@@ -414,7 +422,6 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
             ctx.strokeStyle = '#22d3ee';
             ctx.lineWidth = 2;
             ctx.stroke();
-
             ctx.fillStyle = '#fff';
             ctx.font = '10px monospace';
             ctx.textAlign = 'center';
@@ -425,12 +432,11 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
     }
   };
 
-  // --------------- Initialization: MediaPipe & Frame Loop ---------------- //
-
+  // --- 5. Main Loop & MediaPipe Integration ---
   useEffect(() => {
     let isMounted = true; 
 
-    // Init Hands
+    // Initialize AI
     if (window.Hands && !handsRef.current) {
         try {
             handsRef.current = new window.Hands({
@@ -443,16 +449,19 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
                 minTrackingConfidence: 0.3,
                 selfieMode: settings.mirrorView
             });
+            
+            // ASYNC CALLBACK: This runs whenever AI finishes (variable FPS)
             handsRef.current.onResults((results: any) => {
                  if (!isMounted) return;
-                 // Mark analysis as done
-                 isAnalyzingRef.current = false;
+                 isAnalyzingRef.current = false; // Mark AI as free
                  
                  const width = canvasRef.current?.width || 800;
                  const height = canvasRef.current?.height || 600;
 
+                 // Update Physics Model
                  if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
                     const rawLms = results.multiHandLandmarks[0].map((p: any) => ({x: p.x, y: p.y}));
+                    // Convert normalized to pixel for smoothing
                     const pixelLms = rawLms.map((p: any) => ({x: p.x * width, y: p.y * height}));
                     const smoothLms = smoothLandmarks(prevLmsRef.current, pixelLms, SMOOTH_ALPHA);
                     prevLmsRef.current = smoothLms;
@@ -462,7 +471,7 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
                     prevTipRef.current = tip;
                     holdLeftRef.current = HOLD_FRAMES;
                  } else if (holdLeftRef.current > 0 && prevTipRef.current) {
-                    holdLeftRef.current--;
+                    holdLeftRef.current--; // Persist hand for a few frames to reduce flicker
                  } else {
                     prevTipRef.current = null;
                     prevLmsRef.current = null;
@@ -470,20 +479,20 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
                  
                  const now = performance.now();
                  const analyzeCost = now - lastAnalyzeRef.current;
-                 onStatsUpdate(`Display:${width}x${height} FPS:~${settingsRef.current.analysisFPS} Cost:${analyzeCost.toFixed(1)}ms`);
+                 onStatsUpdate(`Display:${width}x${height} FPS:~${settingsRef.current.analysisFPS} Latency:${analyzeCost.toFixed(0)}ms`);
             });
         } catch (e) {
             console.error("Failed to init hands", e);
         }
     }
 
-    // Frame processing loop
+    // High Performance Frame Loop (Runs at 60/120Hz constantly)
     const frameLoop = async () => {
         if (!isMounted) return;
         const now = performance.now();
         const s = settingsRef.current;
         
-        // 1. Calculate Dimensions
+        // A. Resolution Logic
         let targetW = s.baseShortSide;
         let targetH = s.baseShortSide;
         const [aw, ah] = s.useCustomAspect ? s.aspect : s.aspect;
@@ -491,7 +500,7 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
         if (aw > ah) { targetW = Math.round(targetH * (aw/ah)); } 
         else { targetH = Math.round(targetW * (ah/aw)); }
 
-        // Ensure Canvas Sizes
+        // Sync Canvas Dimensions
         const feedCv = feedCanvasRef.current;
         if (feedCv.width !== targetW || feedCv.height !== targetH) {
            feedCv.width = targetW;
@@ -502,7 +511,7 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
            canvasRef.current.height = targetH;
         }
 
-        // 2. Process Video Frame
+        // B. Video Processing (UI Thread)
         if (videoRef.current && videoRef.current.readyState >= 2) {
             const video = videoRef.current;
             const ctxFeed = feedCv.getContext('2d', { alpha: false })!;
@@ -514,22 +523,23 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
             const y = (targetH - vH * scale) / 2;
 
             ctxFeed.save();
-            // Ensure clear
-            ctxFeed.fillStyle = '#000000';
+            ctxFeed.fillStyle = '#000';
             ctxFeed.fillRect(0,0,targetW,targetH);
             
+            // Rotate & Scale
             ctxFeed.translate(targetW/2, targetH/2);
             ctxFeed.rotate(s.rotationDeg * Math.PI / 180);
             ctxFeed.translate(-targetW/2, -targetH/2);
             ctxFeed.drawImage(video, x, y, vW * scale, vH * scale);
             ctxFeed.restore();
 
-            // 3. AI Analysis Throttle (Non-blocking)
+            // C. Fire-and-Forget AI Dispatch (Worker Thread Logic)
+            // Conditions: AI exists + Not currently calculating + Enough time passed since last calc
             if (handsRef.current && !isAnalyzingRef.current && now >= nextAnalyzeDueRef.current) {
                lastAnalyzeRef.current = now;
                nextAnalyzeDueRef.current = now + (1000 / s.analysisFPS);
                
-               // Prepare Low-Res Analysis Frame
+               // Downscale to low-res for speed
                const anaCv = analysisCanvasRef.current;
                const anaShort = s.analysisShortSide;
                const scaleFactor = Math.min(1, anaShort / Math.min(targetW, targetH));
@@ -542,7 +552,7 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
                const anaCtx = anaCv.getContext('2d', { alpha: false, willReadFrequently: true })!;
                anaCtx.drawImage(feedCv, 0, 0, anaW, anaH);
                
-               // Dynamic options update
+               // Dynamic Options
                if (handsRef.current.setOptions) {
                    handsRef.current.setOptions({ 
                        maxNumHands: s.maxHands,
@@ -550,7 +560,7 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
                    });
                }
                
-               // Mark as busy and send
+               // MARK BUSY AND SEND. DO NOT AWAIT.
                isAnalyzingRef.current = true;
                handsRef.current.send({ image: anaCv }).catch(() => {
                    isAnalyzingRef.current = false;
@@ -558,9 +568,9 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
             } 
         }
 
-        // 4. Draw UI (Always draw, even if video isn't ready)
+        // D. Draw UI (Always runs, decoupled from AI)
         if (canvasRef.current) {
-            const ctx = canvasRef.current.getContext('2d')!;
+            const ctx = canvasRef.current.getContext('2d', { alpha: false })!;
             updateCirclePhysics(prevTipRef.current, now); 
             
             const lmsToDraw = prevTipRef.current && holdLeftRef.current > 0 && prevLmsRef.current 
@@ -573,6 +583,7 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
         requestRef.current = requestAnimationFrame(frameLoop);
     };
 
+    // Kickoff
     requestRef.current = requestAnimationFrame(frameLoop);
 
     return () => {
@@ -583,9 +594,9 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
           handsRef.current = null;
       }
     };
-  }, []); // Only on mount
+  }, []);
 
-  // --------------- Effect: Camera Stream Management ---------------- //
+  // --- 6. Camera Stream Management (Robust Switching) ---
   const { deviceId } = settings;
 
   useEffect(() => {
@@ -595,20 +606,18 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
     const startCamera = async (attempt = 0) => {
         if (!isMounted) return;
 
-        // Cleanup existing stream
+        // Clean up old stream
         if (activeStreamRef.current) {
             activeStreamRef.current.getTracks().forEach(t => t.stop());
             activeStreamRef.current = null;
         }
         
-        // Note: We do NOT stop the render loop here. The video element source is swapped.
-        
         try {
-            console.log(`Swapping Camera (Attempt ${attempt+1}). Device: ${deviceId || 'Default'}`);
+            console.log(`Switching Camera (Attempt ${attempt+1})...`);
             const constraints = {
                 video: {
                     deviceId: deviceId ? { exact: deviceId } : undefined,
-                    width: { ideal: 1280 },
+                    width: { ideal: 1280 }, // Request HD, downscale later if needed
                     height: { ideal: 720 },
                     facingMode: 'user'
                 },
@@ -623,57 +632,56 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
             }
 
             activeStreamRef.current = stream;
+            
             if (videoRef.current) {
                 videoRef.current.srcObject = stream;
+                // Wait for video to actually be ready to play
                 await videoRef.current.play();
-                console.log("Camera swapped successfully");
+                console.log("Camera active.");
             }
 
         } catch (err: any) {
-             console.warn(`Camera swap failed (Attempt ${attempt + 1}):`, err);
+             console.warn(`Camera error:`, err);
              const isBusy = err.name === 'NotReadableError' || err.name === 'NotAllowedError' || err.message?.includes('Device in use');
 
-             if (isMounted && isBusy && attempt < 10) {
-                 const delay = 1000 + (attempt * 1000);
-                 onStatsUpdate(`Camera Busy. Retry ${attempt+1}/10...`);
+             if (isMounted && isBusy && attempt < 5) {
+                 const delay = 500 + (attempt * 1000);
+                 onStatsUpdate(`Camera Busy... Retry ${attempt+1}`);
                  retryTimer = setTimeout(() => startCamera(attempt + 1), delay);
              } else {
-                 onStatsUpdate("Error: Camera Busy or Unavailable");
+                 onStatsUpdate("Error: Camera unavailable");
              }
         }
     };
     
-    // Initial delay to allow previous stream to release
+    // Slight delay to allow browser to release hardware lock
     retryTimer = setTimeout(() => startCamera(0), 100);
 
     return () => {
         isMounted = false;
         clearTimeout(retryTimer);
-        // Only stop tracks on unmount of this effect (device change or component unmount)
         if (activeStreamRef.current) {
             activeStreamRef.current.getTracks().forEach(t => t.stop());
-            activeStreamRef.current = null;
         }
     };
   }, [deviceId]);
 
-  // ... (Interaction handlers remain same)
 
-  // Mouse Interaction Implementation
+  // --- 7. Mouse Event Handlers ---
   const handleMouseDown = (e: React.MouseEvent) => {
     if(!canvasRef.current) return;
     const rect = canvasRef.current.getBoundingClientRect();
     const x = (e.clientX - rect.left) * (canvasRef.current.width / rect.width);
     const y = (e.clientY - rect.top) * (canvasRef.current.height / rect.height);
     
-    // 1. Check for Mapping Handle click
+    // Mapping Edit Hit
     if (settings.isMappingEdit) {
         const w = canvasRef.current.width;
         const h = canvasRef.current.height;
         const hitIdx = settings.mappingPoints.findIndex(p => {
              const px = p.x * w;
              const py = p.y * h;
-             return Math.sqrt((x-px)**2 + (y-py)**2) < 20; // Hit radius
+             return Math.sqrt((x-px)**2 + (y-py)**2) < 20; 
         });
         if (hitIdx !== -1) {
             setDraggingPointIndex(hitIdx);
@@ -682,7 +690,7 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
         return;
     }
 
-    // 2. Check for Circle hit
+    // Circle Hit
     const hitId = circles.slice().reverse().find(c => {
         const dx = x - c.x;
         const dy = y - c.y;
@@ -705,7 +713,6 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
     const x = (e.clientX - rect.left) * (canvasRef.current.width / rect.width);
     const y = (e.clientY - rect.top) * (canvasRef.current.height / rect.height);
 
-    // 1. Handle Mapping Drag
     if (settings.isMappingEdit && draggingPointIndex !== null) {
         const w = canvasRef.current.width;
         const h = canvasRef.current.height;
@@ -717,7 +724,6 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
         return;
     }
 
-    // 2. Handle Circle Drag
     if (!settings.isMappingEdit && draggingRef.current.active && editingId) {
         setCircles(prev => prev.map(c => {
             if (c.id === editingId) {
