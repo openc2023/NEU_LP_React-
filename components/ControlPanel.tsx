@@ -18,7 +18,7 @@ interface ControlPanelProps {
 }
 
 // Reusable UI Components defined outside to prevent re-creation and fix type inference
-const SectionLabel = ({ children }: { children: React.ReactNode }) => (
+const SectionLabel = ({ children }: { children?: React.ReactNode }) => (
   <div className="text-[10px] uppercase tracking-wider text-zinc-500 font-semibold mb-1">{children}</div>
 );
 
