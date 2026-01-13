@@ -1,0 +1,7 @@
+{
+  "name": "NEU_LP_React ",
+  "description": "A touchless gesture control interface using MediaPipe Hands. Interact with virtual circles by rotating your finger in the air.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
