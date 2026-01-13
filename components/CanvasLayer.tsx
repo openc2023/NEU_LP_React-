@@ -24,6 +24,11 @@ const SPIN_GRACE_MS = 2000;
 const INDEX_TIP = 8;
 const ROT_SPEED_DEG_PER_SEC = 45;
 
+// CRITICAL: We lock the UI/Physics coordinate system to this height.
+// This ensures that when user changes "Resolution" (e.g. to 360p for speed),
+// the circles don't move around or disappear.
+const LOGICAL_REF_HEIGHT = 720; 
+
 const CanvasLayer: React.FC<CanvasLayerProps> = ({
   settings,
   circles,
@@ -38,9 +43,9 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   
   // --- Offscreen Buffers (Performance Critical) ---
-  // feedCanvas: High Res, rotated, scaled (for Display)
+  // feedCanvas: Scaled to settings.baseShortSide (e.g., 360p, 480p) for performance
   const feedCanvasRef = useRef<HTMLCanvasElement>(document.createElement('canvas'));
-  // analysisCanvas: Low Res, downsampled (for AI)
+  // analysisCanvas: Scaled to settings.analysisShortSide for AI speed
   const analysisCanvasRef = useRef<HTMLCanvasElement>(document.createElement('canvas'));
 
   // --- Mutable High-Frequency State (No React Re-renders) ---
@@ -257,14 +262,14 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
         ctx.fillRect(0, 0, width, height);
     }
     
-    // -- Camera Feed Layer --
+    // -- Camera Feed Layer (Scaled up from FeedCanvas) --
     if (s.showCamera) {
       ctx.save();
       if (s.mirrorView) {
         ctx.translate(width, 0);
         ctx.scale(-1, 1);
       }
-      // Use the pre-processed feed canvas
+      // This draws the potentially low-res video onto the high-res UI canvas
       ctx.drawImage(feedCanvasRef.current, 0, 0, width, height);
       ctx.restore();
     }
@@ -479,7 +484,7 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
                  
                  const now = performance.now();
                  const analyzeCost = now - lastAnalyzeRef.current;
-                 onStatsUpdate(`Display:${width}x${height} FPS:~${settingsRef.current.analysisFPS} Latency:${analyzeCost.toFixed(0)}ms`);
+                 onStatsUpdate(`UI:${width}x${height} FPS:~${settingsRef.current.analysisFPS} AI:${analyzeCost.toFixed(0)}ms`);
             });
         } catch (e) {
             console.error("Failed to init hands", e);
@@ -492,23 +497,35 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
         const now = performance.now();
         const s = settingsRef.current;
         
-        // A. Resolution Logic
-        let targetW = s.baseShortSide;
-        let targetH = s.baseShortSide;
+        // --- Resolution Logic Fixed ---
+        // 1. Determine Logical UI Size (Fixed Reference)
+        // This ensures UI coordinates (circles) don't shift when resolution quality changes.
+        let logicalH = LOGICAL_REF_HEIGHT;
+        let logicalW = LOGICAL_REF_HEIGHT; // Placeholder
         const [aw, ah] = s.useCustomAspect ? s.aspect : s.aspect;
         
-        if (aw > ah) { targetW = Math.round(targetH * (aw/ah)); } 
-        else { targetH = Math.round(targetW * (ah/aw)); }
+        if (aw > ah) { logicalW = Math.round(logicalH * (aw/ah)); } 
+        else { logicalH = Math.round(logicalW * (ah/aw)); } // Should not happen with current logic but for safety
+        if (aw <= ah) { logicalW = LOGICAL_REF_HEIGHT; logicalH = Math.round(logicalW * (ah/aw)); }
+
+        // 2. Determine Video Feed Size (Performance Setting)
+        // This is what the user selects (360p, 720p, etc)
+        const videoScale = s.baseShortSide / LOGICAL_REF_HEIGHT;
+        const feedW = Math.round(logicalW * videoScale);
+        const feedH = Math.round(logicalH * videoScale);
 
         // Sync Canvas Dimensions
+        // Feed (Video) uses the performance setting size
         const feedCv = feedCanvasRef.current;
-        if (feedCv.width !== targetW || feedCv.height !== targetH) {
-           feedCv.width = targetW;
-           feedCv.height = targetH;
+        if (feedCv.width !== feedW || feedCv.height !== feedH) {
+           feedCv.width = feedW;
+           feedCv.height = feedH;
         }
-        if (canvasRef.current && (canvasRef.current.width !== targetW || canvasRef.current.height !== targetH)) {
-           canvasRef.current.width = targetW;
-           canvasRef.current.height = targetH;
+        
+        // UI Canvas uses the Fixed Logical size (High Res / Stable)
+        if (canvasRef.current && (canvasRef.current.width !== logicalW || canvasRef.current.height !== logicalH)) {
+           canvasRef.current.width = logicalW;
+           canvasRef.current.height = logicalH;
         }
 
         // B. Video Processing (UI Thread)
@@ -518,38 +535,38 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
             
             const vW = video.videoWidth;
             const vH = video.videoHeight;
-            const scale = Math.max(targetW / vW, targetH / vH) * s.scale;
-            const x = (targetW - vW * scale) / 2;
-            const y = (targetH - vH * scale) / 2;
+            const scale = Math.max(feedW / vW, feedH / vH) * s.scale;
+            const x = (feedW - vW * scale) / 2;
+            const y = (feedH - vH * scale) / 2;
 
             ctxFeed.save();
             ctxFeed.fillStyle = '#000';
-            ctxFeed.fillRect(0,0,targetW,targetH);
+            ctxFeed.fillRect(0,0,feedW,feedH);
             
             // Rotate & Scale
-            ctxFeed.translate(targetW/2, targetH/2);
+            ctxFeed.translate(feedW/2, feedH/2);
             ctxFeed.rotate(s.rotationDeg * Math.PI / 180);
-            ctxFeed.translate(-targetW/2, -targetH/2);
+            ctxFeed.translate(-feedW/2, -feedH/2);
             ctxFeed.drawImage(video, x, y, vW * scale, vH * scale);
             ctxFeed.restore();
 
             // C. Fire-and-Forget AI Dispatch (Worker Thread Logic)
-            // Conditions: AI exists + Not currently calculating + Enough time passed since last calc
             if (handsRef.current && !isAnalyzingRef.current && now >= nextAnalyzeDueRef.current) {
                lastAnalyzeRef.current = now;
                nextAnalyzeDueRef.current = now + (1000 / s.analysisFPS);
                
-               // Downscale to low-res for speed
+               // Use separate analysis resolution setting for AI
                const anaCv = analysisCanvasRef.current;
                const anaShort = s.analysisShortSide;
-               const scaleFactor = Math.min(1, anaShort / Math.min(targetW, targetH));
-               const anaW = Math.round(targetW * scaleFactor);
-               const anaH = Math.round(targetH * scaleFactor);
+               const scaleFactor = Math.min(1, anaShort / Math.min(feedW, feedH));
+               const anaW = Math.round(feedW * scaleFactor);
+               const anaH = Math.round(feedH * scaleFactor);
                
                if(anaCv.width !== anaW || anaCv.height !== anaH) {
                  anaCv.width = anaW; anaCv.height = anaH;
                }
                const anaCtx = anaCv.getContext('2d', { alpha: false, willReadFrequently: true })!;
+               // Draw from feed (which is already rotated/scaled) to analysis
                anaCtx.drawImage(feedCv, 0, 0, anaW, anaH);
                
                // Dynamic Options
@@ -560,7 +577,6 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
                    });
                }
                
-               // MARK BUSY AND SEND. DO NOT AWAIT.
                isAnalyzingRef.current = true;
                handsRef.current.send({ image: anaCv }).catch(() => {
                    isAnalyzingRef.current = false;
@@ -574,10 +590,10 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
             updateCirclePhysics(prevTipRef.current, now); 
             
             const lmsToDraw = prevTipRef.current && holdLeftRef.current > 0 && prevLmsRef.current 
-                ? prevLmsRef.current.map(p => ({x: p.x / targetW, y: p.y / targetH}))
+                ? prevLmsRef.current.map(p => ({x: p.x / logicalW, y: p.y / logicalH}))
                 : null;
 
-            draw(ctx, targetW, targetH, lmsToDraw, prevTipRef.current);
+            draw(ctx, logicalW, logicalH, lmsToDraw, prevTipRef.current);
         }
 
         requestRef.current = requestAnimationFrame(frameLoop);
