@@ -24,9 +24,6 @@ const SPIN_GRACE_MS = 2000;
 const INDEX_TIP = 8;
 const ROT_SPEED_DEG_PER_SEC = 45;
 
-// CRITICAL: We lock the UI/Physics coordinate system to this height.
-// This ensures that when user changes "Resolution" (e.g. to 360p for speed),
-// the circles don't move around or disappear.
 const LOGICAL_REF_HEIGHT = 720; 
 
 const CanvasLayer: React.FC<CanvasLayerProps> = ({
@@ -43,9 +40,7 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   
   // --- Offscreen Buffers (Performance Critical) ---
-  // feedCanvas: Scaled to settings.baseShortSide (e.g., 360p, 480p) for performance
   const feedCanvasRef = useRef<HTMLCanvasElement>(document.createElement('canvas'));
-  // analysisCanvas: Scaled to settings.analysisShortSide for AI speed
   const analysisCanvasRef = useRef<HTMLCanvasElement>(document.createElement('canvas'));
 
   // --- Mutable High-Frequency State (No React Re-renders) ---
@@ -69,7 +64,7 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
   const activeStreamRef = useRef<MediaStream | null>(null);
   const handsRef = useRef<any>(null);
 
-  // --- Sync Props to Refs (To access latest props in animation loop) ---
+  // --- Sync Props to Refs ---
   const circlesRef = useRef(circles);
   const settingsRef = useRef(settings);
   const editingIdRef = useRef(editingId);
@@ -262,14 +257,13 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
         ctx.fillRect(0, 0, width, height);
     }
     
-    // -- Camera Feed Layer (Scaled up from FeedCanvas) --
+    // -- Camera Feed Layer --
     if (s.showCamera) {
       ctx.save();
       if (s.mirrorView) {
         ctx.translate(width, 0);
         ctx.scale(-1, 1);
       }
-      // This draws the potentially low-res video onto the high-res UI canvas
       ctx.drawImage(feedCanvasRef.current, 0, 0, width, height);
       ctx.restore();
     }
@@ -484,7 +478,7 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
                  
                  const now = performance.now();
                  const analyzeCost = now - lastAnalyzeRef.current;
-                 onStatsUpdate(`UI:${width}x${height} FPS:~${settingsRef.current.analysisFPS} AI:${analyzeCost.toFixed(0)}ms`);
+                 onStatsUpdate(`SYS_RES:${width}x${height} // CYCLE:${settingsRef.current.analysisFPS}Hz // AI_LATENCY:${analyzeCost.toFixed(0)}ms`);
             });
         } catch (e) {
             console.error("Failed to init hands", e);
@@ -497,32 +491,25 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
         const now = performance.now();
         const s = settingsRef.current;
         
-        // --- Resolution Logic Fixed ---
-        // 1. Determine Logical UI Size (Fixed Reference)
-        // This ensures UI coordinates (circles) don't shift when resolution quality changes.
         let logicalH = LOGICAL_REF_HEIGHT;
-        let logicalW = LOGICAL_REF_HEIGHT; // Placeholder
+        let logicalW = LOGICAL_REF_HEIGHT; 
         const [aw, ah] = s.useCustomAspect ? s.aspect : s.aspect;
         
         if (aw > ah) { logicalW = Math.round(logicalH * (aw/ah)); } 
-        else { logicalH = Math.round(logicalW * (ah/aw)); } // Should not happen with current logic but for safety
+        else { logicalH = Math.round(logicalW * (ah/aw)); }
         if (aw <= ah) { logicalW = LOGICAL_REF_HEIGHT; logicalH = Math.round(logicalW * (ah/aw)); }
 
-        // 2. Determine Video Feed Size (Performance Setting)
-        // This is what the user selects (360p, 720p, etc)
         const videoScale = s.baseShortSide / LOGICAL_REF_HEIGHT;
         const feedW = Math.round(logicalW * videoScale);
         const feedH = Math.round(logicalH * videoScale);
 
         // Sync Canvas Dimensions
-        // Feed (Video) uses the performance setting size
         const feedCv = feedCanvasRef.current;
         if (feedCv.width !== feedW || feedCv.height !== feedH) {
            feedCv.width = feedW;
            feedCv.height = feedH;
         }
         
-        // UI Canvas uses the Fixed Logical size (High Res / Stable)
         if (canvasRef.current && (canvasRef.current.width !== logicalW || canvasRef.current.height !== logicalH)) {
            canvasRef.current.width = logicalW;
            canvasRef.current.height = logicalH;
@@ -566,7 +553,6 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
                  anaCv.width = anaW; anaCv.height = anaH;
                }
                const anaCtx = anaCv.getContext('2d', { alpha: false, willReadFrequently: true })!;
-               // Draw from feed (which is already rotated/scaled) to analysis
                anaCtx.drawImage(feedCv, 0, 0, anaW, anaH);
                
                // Dynamic Options
@@ -662,10 +648,10 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
 
              if (isMounted && isBusy && attempt < 5) {
                  const delay = 500 + (attempt * 1000);
-                 onStatsUpdate(`Camera Busy... Retry ${attempt+1}`);
+                 onStatsUpdate(`INIT_CAM_BUSY_RETRY_${attempt+1}`);
                  retryTimer = setTimeout(() => startCamera(attempt + 1), delay);
              } else {
-                 onStatsUpdate("Error: Camera unavailable");
+                 onStatsUpdate("ERR_CAM_UNAVAILABLE");
              }
         }
     };
@@ -771,14 +757,23 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
             clipPath: getClipPath(),
             transition: 'border-radius 0.2s ease-out'
         }}
-        className="max-w-full max-h-full shadow-2xl cursor-crosshair touch-none"
+        className="max-w-full max-h-full shadow-2xl cursor-crosshair touch-none ring-1 ring-white/5"
         onMouseDown={handleMouseDown}
         onMouseMove={handleMouseMove}
         onMouseUp={handleMouseUp}
         onMouseLeave={handleMouseUp}
       />
-      <div className="absolute bottom-4 left-4 text-cyan-200/50 text-xs pointer-events-none transition-opacity duration-300">
-         {settings.isMappingEdit ? 'DRAG POINTS TO MAP PROJECTION' : 'Shift + [/] to resize • Drag to move'}
+      
+      {/* HUD Corners */}
+      <div className="absolute inset-4 pointer-events-none opacity-50">
+          <div className="absolute top-0 left-0 w-8 h-8 border-t-2 border-l-2 border-cyan-500/50 rounded-tl-lg"></div>
+          <div className="absolute top-0 right-0 w-8 h-8 border-t-2 border-r-2 border-cyan-500/50 rounded-tr-lg"></div>
+          <div className="absolute bottom-0 left-0 w-8 h-8 border-b-2 border-l-2 border-cyan-500/50 rounded-bl-lg"></div>
+          <div className="absolute bottom-0 right-0 w-8 h-8 border-b-2 border-r-2 border-cyan-500/50 rounded-br-lg"></div>
+      </div>
+
+      <div className="absolute bottom-6 left-1/2 transform -translate-x-1/2 text-cyan-500/40 text-[10px] pointer-events-none font-tech tracking-[0.2em] uppercase">
+         {settings.isMappingEdit ? 'SYSTEM_STATE: MESH_EDIT_MODE' : 'SYSTEM_STATE: ACTIVE_MONITORING'}
       </div>
     </div>
   );
