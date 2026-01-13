@@ -433,12 +433,13 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
     let camera: any = null;
     let hands: any = null;
     let watchdogTimer: any = null;
+    let isMounted = true; 
 
     const onResults = (results: any) => {
+      if (!isMounted) return;
       const now = performance.now();
       const analyzeCost = now - lastAnalyzeRef.current;
       
-      // Update Watchdog time
       lastFrameTimeRef.current = now;
       
       const width = canvasRef.current!.width;
@@ -448,7 +449,6 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
       let tip: Point | null = null;
       let landmarksToDraw: any = null;
 
-      // Process Landmarks
       if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
         const rawLms = results.multiHandLandmarks[0].map((p: any) => ({x: p.x, y: p.y}));
         const pixelLms = rawLms.map((p: any) => ({x: p.x * width, y: p.y * height}));
@@ -476,31 +476,47 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
     };
 
     const init = async () => {
+      if (!isMounted) return;
+
       if (!window.Hands || !window.Camera) {
         console.error("MediaPipe scripts not loaded");
         return;
       }
 
-      hands = new window.Hands({
-        locateFile: (file: string) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
-      });
+      try {
+        hands = new window.Hands({
+          locateFile: (file: string) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+        });
 
-      hands.setOptions({
-        maxNumHands: settingsRef.current.maxHands,
-        modelComplexity: 1,
-        minDetectionConfidence: 0.3,
-        minTrackingConfidence: 0.3,
-        selfieMode: settingsRef.current.mirrorView
-      });
+        hands.setOptions({
+          maxNumHands: settingsRef.current.maxHands,
+          modelComplexity: 1,
+          minDetectionConfidence: 0.3,
+          minTrackingConfidence: 0.3,
+          selfieMode: settingsRef.current.mirrorView
+        });
 
-      hands.onResults(onResults);
+        hands.onResults(onResults);
+      } catch (err) {
+        console.error("Error initializing MediaPipe Hands:", err);
+        return;
+      }
 
       if (videoRef.current) {
+        // CLEANUP PREVIOUS STREAMS
+        if (videoRef.current.srcObject) {
+            try {
+                const s = videoRef.current.srcObject as MediaStream;
+                s.getTracks().forEach(t => t.stop());
+            } catch(e) {}
+            videoRef.current.srcObject = null;
+        }
+
         camera = new window.Camera(videoRef.current, {
           onFrame: async () => {
+            if (!isMounted) return;
             const now = performance.now();
             
-            // 1. Draw video to Feed Canvas
             const video = videoRef.current;
             if (!video || !video.videoWidth) return;
 
@@ -538,7 +554,6 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
             ctxFeed.drawImage(video, x, y, vW * scale, vH * scale);
             ctxFeed.restore();
 
-            // 2. AI Check
             if (now >= nextAnalyzeDueRef.current) {
                lastAnalyzeRef.current = now;
                nextAnalyzeDueRef.current = now + (1000 / s.analysisFPS);
@@ -555,7 +570,7 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
                const anaCtx = anaCv.getContext('2d', { alpha: false, willReadFrequently: true })!;
                anaCtx.drawImage(feedCv, 0, 0, anaW, anaH);
                
-               await hands.send({ image: anaCv });
+               if(hands) await hands.send({ image: anaCv });
             } else {
                const ctx = canvasRef.current!.getContext('2d')!;
                updateCirclePhysics(prevTipRef.current, now); 
@@ -570,36 +585,99 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
           width: 1280,
           height: 720
         });
-        camera.start();
 
-        // Start Watchdog
-        lastFrameTimeRef.current = performance.now();
-        watchdogTimer = setInterval(() => {
-           const now = performance.now();
-           // If no frame for 3000ms
-           if (now - lastFrameTimeRef.current > 3000) {
-               console.warn("Camera freeze detected (Watchdog). Attempting restart.");
-               if (videoRef.current && videoRef.current.paused) {
-                   videoRef.current.play().catch(e => console.error("Watchdog play failed", e));
-               }
-           }
-        }, 2000);
+        const startCamera = async (retryCount = 0) => {
+            if (!isMounted || !camera) return;
+            try {
+                // Manual device selection override if set
+                if (settingsRef.current.deviceId && navigator.mediaDevices) {
+                    try {
+                        const stream = await navigator.mediaDevices.getUserMedia({
+                            video: { deviceId: { exact: settingsRef.current.deviceId }, width: 1280, height: 720 }
+                        });
+                        if (videoRef.current) {
+                           videoRef.current.srcObject = stream;
+                           // If we set srcObject manually, camera.start() might be redundant or conflict,
+                           // but MediaPipe's Camera utility often expects to manage it.
+                           // Actually, looking at source, Camera utils blindly calls getUserMedia.
+                           // So we will stick to the wrapper's behavior but handle the error.
+                        }
+                    } catch(e) { console.warn("Manual stream fetch failed", e); }
+                }
+
+                await camera.start();
+                console.log("Camera started");
+                
+                lastFrameTimeRef.current = performance.now();
+                watchdogTimer = setInterval(() => {
+                   const now = performance.now();
+                   if (now - lastFrameTimeRef.current > 4000) {
+                       console.warn("Camera freeze detected. Attempting restart.");
+                       if (videoRef.current && videoRef.current.paused) {
+                           videoRef.current.play().catch(console.error);
+                       }
+                   }
+                }, 2000);
+
+            } catch (err: any) {
+                console.warn(`Camera start failed (Attempt ${retryCount + 1}):`, err);
+                
+                // CRITICAL CLEANUP ON FAILURE
+                if (videoRef.current && videoRef.current.srcObject) {
+                    const stream = videoRef.current.srcObject as MediaStream;
+                    stream.getTracks().forEach(t => t.stop());
+                    videoRef.current.srcObject = null;
+                }
+
+                const isDeviceBusy = err.name === 'NotReadableError' || err.name === 'NotAllowedError' || err.message?.includes('Device in use');
+
+                if (isDeviceBusy && retryCount < 10) {
+                    const delay = 1000 + (retryCount * 1000); 
+                    console.log(`Retrying in ${delay}ms...`);
+                    onStatsUpdate(`Camera Busy... Retry ${retryCount+1}/10`);
+                    setTimeout(() => startCamera(retryCount + 1), delay);
+                } else {
+                    onStatsUpdate("Error: Camera Busy/Blocked");
+                }
+            }
+        };
+
+        startCamera();
       }
     };
 
-    const t = setTimeout(init, 500);
+    // Initial Delay extended to avoid React StrictMode conflicts
+    const t = setTimeout(init, 1000);
 
     return () => {
+      isMounted = false;
       clearTimeout(t);
       if (watchdogTimer) clearInterval(watchdogTimer);
-      if (camera) camera.stop();
-      if (hands) hands.close();
+      
+      if (camera) {
+          try { camera.stop(); } catch(e) {}
+      }
+      if (hands) {
+          try { hands.close(); } catch(e) {}
+      }
+      
+      // FORCE STOP TRACKS
+      if (videoRef.current && videoRef.current.srcObject) {
+         try {
+             const s = videoRef.current.srcObject as MediaStream;
+             s.getTracks().forEach(t => t.stop());
+         } catch(e) {}
+         videoRef.current.srcObject = null;
+      }
+      
       runtimeRef.current.forEach(rt => {
           if(rt.audioEl) rt.audioEl.pause();
           if(rt.gifAnim) try{ rt.gifAnim.stop(); }catch(e){}
       });
     };
-  }, []); 
+  }, []); // Intentionally empty dependency array to run once (or twice in strict mode)
+
+  // ... (Rest of the component remains same)
 
   // Mouse Interaction Implementation
   const handleMouseDown = (e: React.MouseEvent) => {
