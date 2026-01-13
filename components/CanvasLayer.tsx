@@ -49,9 +49,7 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
   const nextAnalyzeDueRef = useRef<number>(0);
   const draggingRef = useRef<{active: boolean, offset: Point}>({ active: false, offset: {x:0, y:0} });
   const pulseRef = useRef<number>(0); // For global pulse animation
-  
-  // Watchdog Ref
-  const lastFrameTimeRef = useRef<number>(0);
+  const requestRef = useRef<number>(0); // RequestAnimationFrame ID
   
   // Mapping State
   const [draggingPointIndex, setDraggingPointIndex] = useState<number | null>(null);
@@ -430,100 +428,23 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
   // --------------- Initialization: MediaPipe & Camera ---------------- //
 
   useEffect(() => {
-    let camera: any = null;
     let hands: any = null;
-    let watchdogTimer: any = null;
+    let stream: MediaStream | null = null;
     let isMounted = true; 
 
-    const onResults = (results: any) => {
-      if (!isMounted) return;
-      const now = performance.now();
-      const analyzeCost = now - lastAnalyzeRef.current;
-      
-      lastFrameTimeRef.current = now;
-      
-      const width = canvasRef.current!.width;
-      const height = canvasRef.current!.height;
-      const ctx = canvasRef.current!.getContext('2d')!;
-
-      let tip: Point | null = null;
-      let landmarksToDraw: any = null;
-
-      if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
-        const rawLms = results.multiHandLandmarks[0].map((p: any) => ({x: p.x, y: p.y}));
-        const pixelLms = rawLms.map((p: any) => ({x: p.x * width, y: p.y * height}));
-        const smoothLms = smoothLandmarks(prevLmsRef.current, pixelLms, SMOOTH_ALPHA);
-        prevLmsRef.current = smoothLms;
+    // Frame processing loop
+    const frameLoop = async () => {
+        if (!isMounted) return;
+        const now = performance.now();
+        const s = settingsRef.current;
         
-        const rawTip = smoothLms[INDEX_TIP];
-        tip = smoothPoint(prevTipRef.current, rawTip, 0.5);
-        prevTipRef.current = tip;
-        holdLeftRef.current = HOLD_FRAMES;
-        landmarksToDraw = smoothLms.map((p: any) => ({x: p.x / width, y: p.y / height}));
-      } else if (holdLeftRef.current > 0 && prevTipRef.current) {
-        tip = prevTipRef.current;
-        holdLeftRef.current--;
-        landmarksToDraw = prevLmsRef.current?.map(p => ({x: p.x / width, y: p.y / height}));
-      } else {
-        prevTipRef.current = null;
-        prevLmsRef.current = null;
-      }
-
-      updateCirclePhysics(tip, now);
-      draw(ctx, width, height, landmarksToDraw, tip);
-      
-      onStatsUpdate(`Display:${width}x${height} FPS:~${settingsRef.current.analysisFPS} Cost:${analyzeCost.toFixed(1)}ms`);
-    };
-
-    const init = async () => {
-      if (!isMounted) return;
-
-      if (!window.Hands || !window.Camera) {
-        console.error("MediaPipe scripts not loaded");
-        return;
-      }
-
-      try {
-        hands = new window.Hands({
-          locateFile: (file: string) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
-        });
-
-        hands.setOptions({
-          maxNumHands: settingsRef.current.maxHands,
-          modelComplexity: 1,
-          minDetectionConfidence: 0.3,
-          minTrackingConfidence: 0.3,
-          selfieMode: settingsRef.current.mirrorView
-        });
-
-        hands.onResults(onResults);
-      } catch (err) {
-        console.error("Error initializing MediaPipe Hands:", err);
-        return;
-      }
-
-      if (videoRef.current) {
-        // CLEANUP PREVIOUS STREAMS
-        if (videoRef.current.srcObject) {
-            try {
-                const s = videoRef.current.srcObject as MediaStream;
-                s.getTracks().forEach(t => t.stop());
-            } catch(e) {}
-            videoRef.current.srcObject = null;
-        }
-
-        camera = new window.Camera(videoRef.current, {
-          onFrame: async () => {
-            if (!isMounted) return;
-            const now = performance.now();
-            
+        // 1. Process Video Frame
+        if (videoRef.current && videoRef.current.readyState >= 2) {
             const video = videoRef.current;
-            if (!video || !video.videoWidth) return;
-
             const feedCv = feedCanvasRef.current;
             const ctxFeed = feedCv.getContext('2d', { alpha: false })!;
             
-            const s = settingsRef.current;
+            // Calculate Aspect Ratio logic
             let targetW = s.baseShortSide;
             let targetH = s.baseShortSide;
             const [aw, ah] = s.useCustomAspect ? s.aspect : s.aspect;
@@ -531,6 +452,7 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
             if (aw > ah) { targetW = Math.round(targetH * (aw/ah)); } 
             else { targetH = Math.round(targetW * (ah/aw)); }
 
+            // Resize offscreen canvas if needed
             if (feedCv.width !== targetW || feedCv.height !== targetH) {
                feedCv.width = targetW;
                feedCv.height = targetH;
@@ -540,6 +462,7 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
                }
             }
 
+            // Draw Video transformed
             const vW = video.videoWidth;
             const vH = video.videoHeight;
             const scale = Math.max(targetW / vW, targetH / vH) * s.scale;
@@ -554,10 +477,12 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
             ctxFeed.drawImage(video, x, y, vW * scale, vH * scale);
             ctxFeed.restore();
 
-            if (now >= nextAnalyzeDueRef.current) {
+            // 2. AI Analysis Throttle
+            if (hands && now >= nextAnalyzeDueRef.current) {
                lastAnalyzeRef.current = now;
                nextAnalyzeDueRef.current = now + (1000 / s.analysisFPS);
 
+               // Downscale for analysis
                const anaCv = analysisCanvasRef.current;
                const anaShort = s.analysisShortSide;
                const scaleFactor = Math.min(1, anaShort / Math.min(targetW, targetH));
@@ -570,103 +495,153 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
                const anaCtx = anaCv.getContext('2d', { alpha: false, willReadFrequently: true })!;
                anaCtx.drawImage(feedCv, 0, 0, anaW, anaH);
                
-               if(hands) await hands.send({ image: anaCv });
-            } else {
-               const ctx = canvasRef.current!.getContext('2d')!;
-               updateCirclePhysics(prevTipRef.current, now); 
-               
-               const lmsToDraw = prevTipRef.current && holdLeftRef.current > 0 && prevLmsRef.current 
-                   ? prevLmsRef.current.map(p => ({x: p.x / targetW, y: p.y / targetH}))
-                   : null;
+               await hands.send({ image: anaCv });
+            } 
+            
+            // 3. Draw UI (always, even if AI didn't run this frame)
+            const ctx = canvasRef.current!.getContext('2d')!;
+            updateCirclePhysics(prevTipRef.current, now); 
+            
+            const lmsToDraw = prevTipRef.current && holdLeftRef.current > 0 && prevLmsRef.current 
+                ? prevLmsRef.current.map(p => ({x: p.x / targetW, y: p.y / targetH}))
+                : null;
 
-               draw(ctx, targetW, targetH, lmsToDraw, prevTipRef.current);
-            }
-          },
-          width: 1280,
-          height: 720
-        });
+            draw(ctx, targetW, targetH, lmsToDraw, prevTipRef.current);
 
-        const startCamera = async (retryCount = 0) => {
-            if (!isMounted || !camera) return;
-            try {
-                // Manual device selection override if set
-                if (settingsRef.current.deviceId && navigator.mediaDevices) {
-                    try {
-                        const stream = await navigator.mediaDevices.getUserMedia({
-                            video: { deviceId: { exact: settingsRef.current.deviceId }, width: 1280, height: 720 }
-                        });
-                        if (videoRef.current) {
-                           videoRef.current.srcObject = stream;
-                           // If we set srcObject manually, camera.start() might be redundant or conflict,
-                           // but MediaPipe's Camera utility often expects to manage it.
-                           // Actually, looking at source, Camera utils blindly calls getUserMedia.
-                           // So we will stick to the wrapper's behavior but handle the error.
-                        }
-                    } catch(e) { console.warn("Manual stream fetch failed", e); }
-                }
+        } else {
+             // If video not ready, just draw physics/UI
+             if (canvasRef.current) {
+                const ctx = canvasRef.current.getContext('2d')!;
+                updateCirclePhysics(prevTipRef.current, now);
+                draw(ctx, canvasRef.current.width, canvasRef.current.height, null, null);
+             }
+        }
 
-                await camera.start();
-                console.log("Camera started");
-                
-                lastFrameTimeRef.current = performance.now();
-                watchdogTimer = setInterval(() => {
-                   const now = performance.now();
-                   if (now - lastFrameTimeRef.current > 4000) {
-                       console.warn("Camera freeze detected. Attempting restart.");
-                       if (videoRef.current && videoRef.current.paused) {
-                           videoRef.current.play().catch(console.error);
-                       }
-                   }
-                }, 2000);
+        requestRef.current = requestAnimationFrame(frameLoop);
+    };
 
-            } catch (err: any) {
-                console.warn(`Camera start failed (Attempt ${retryCount + 1}):`, err);
-                
-                // CRITICAL CLEANUP ON FAILURE
-                if (videoRef.current && videoRef.current.srcObject) {
-                    const stream = videoRef.current.srcObject as MediaStream;
-                    stream.getTracks().forEach(t => t.stop());
-                    videoRef.current.srcObject = null;
-                }
+    const onResults = (results: any) => {
+      if (!isMounted) return;
+      const width = canvasRef.current?.width || 800;
+      const height = canvasRef.current?.height || 600;
 
-                const isDeviceBusy = err.name === 'NotReadableError' || err.name === 'NotAllowedError' || err.message?.includes('Device in use');
-
-                if (isDeviceBusy && retryCount < 10) {
-                    const delay = 1000 + (retryCount * 1000); 
-                    console.log(`Retrying in ${delay}ms...`);
-                    onStatsUpdate(`Camera Busy... Retry ${retryCount+1}/10`);
-                    setTimeout(() => startCamera(retryCount + 1), delay);
-                } else {
-                    onStatsUpdate("Error: Camera Busy/Blocked");
-                }
-            }
-        };
-
-        startCamera();
+      // Process Landmarks
+      if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+        const rawLms = results.multiHandLandmarks[0].map((p: any) => ({x: p.x, y: p.y}));
+        const pixelLms = rawLms.map((p: any) => ({x: p.x * width, y: p.y * height}));
+        const smoothLms = smoothLandmarks(prevLmsRef.current, pixelLms, SMOOTH_ALPHA);
+        prevLmsRef.current = smoothLms;
+        
+        const rawTip = smoothLms[INDEX_TIP];
+        const tip = smoothPoint(prevTipRef.current, rawTip, 0.5);
+        prevTipRef.current = tip;
+        holdLeftRef.current = HOLD_FRAMES;
+      } else if (holdLeftRef.current > 0 && prevTipRef.current) {
+        holdLeftRef.current--;
+      } else {
+        prevTipRef.current = null;
+        prevLmsRef.current = null;
       }
+      
+      const now = performance.now();
+      const analyzeCost = now - lastAnalyzeRef.current;
+      onStatsUpdate(`Display:${width}x${height} FPS:~${settingsRef.current.analysisFPS} Cost:${analyzeCost.toFixed(1)}ms`);
+    };
+
+    const setupCamera = async (retryCount = 0) => {
+        if (!isMounted) return;
+        
+        try {
+            // Stop existing tracks if any
+            if (stream) {
+                stream.getTracks().forEach(track => track.stop());
+            }
+
+            const constraints = {
+                video: {
+                    deviceId: settingsRef.current.deviceId ? { exact: settingsRef.current.deviceId } : undefined,
+                    width: { ideal: 1280 },
+                    height: { ideal: 720 },
+                    facingMode: 'user'
+                },
+                audio: false
+            };
+            
+            console.log(`Requesting camera (Attempt ${retryCount + 1})...`);
+            stream = await navigator.mediaDevices.getUserMedia(constraints);
+            
+            if (videoRef.current) {
+                videoRef.current.srcObject = stream;
+                await videoRef.current.play();
+                console.log("Camera started successfully");
+                
+                // Start Loop
+                requestRef.current = requestAnimationFrame(frameLoop);
+            }
+        } catch (err: any) {
+             console.warn(`Camera start failed (Attempt ${retryCount + 1}):`, err);
+             
+             const isDeviceBusy = err.name === 'NotReadableError' || err.name === 'NotAllowedError' || err.message?.includes('Device in use');
+
+             if (isDeviceBusy && retryCount < 10) {
+                 const delay = 1000 + (retryCount * 1000); 
+                 console.log(`Retrying in ${delay}ms...`);
+                 onStatsUpdate(`Camera Busy... Retry ${retryCount+1}/10`);
+                 setTimeout(() => setupCamera(retryCount + 1), delay);
+             } else {
+                 onStatsUpdate("Error: Camera Busy/Blocked");
+             }
+        }
+    };
+
+    const init = async () => {
+      if (!isMounted) return;
+
+      if (!window.Hands) {
+        console.error("MediaPipe Hands script not loaded");
+        return;
+      }
+
+      // Init Hands
+      try {
+        hands = new window.Hands({
+            locateFile: (file: string) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+        });
+        hands.setOptions({
+            maxNumHands: settingsRef.current.maxHands,
+            modelComplexity: 1,
+            minDetectionConfidence: 0.3,
+            minTrackingConfidence: 0.3,
+            selfieMode: settingsRef.current.mirrorView
+        });
+        hands.onResults(onResults);
+      } catch (e) {
+          console.error("Failed to initialize MediaPipe Hands", e);
+      }
+
+      // Init Camera
+      setupCamera();
     };
 
     // Initial Delay extended to avoid React StrictMode conflicts
-    const t = setTimeout(init, 1000);
+    const t = setTimeout(init, 800);
 
     return () => {
       isMounted = false;
       clearTimeout(t);
-      if (watchdogTimer) clearInterval(watchdogTimer);
+      cancelAnimationFrame(requestRef.current);
       
-      if (camera) {
-          try { camera.stop(); } catch(e) {}
-      }
       if (hands) {
           try { hands.close(); } catch(e) {}
       }
       
-      // FORCE STOP TRACKS
+      // Strict Stream Cleanup
+      if (stream) {
+         stream.getTracks().forEach(t => t.stop());
+      }
       if (videoRef.current && videoRef.current.srcObject) {
-         try {
-             const s = videoRef.current.srcObject as MediaStream;
-             s.getTracks().forEach(t => t.stop());
-         } catch(e) {}
+         const s = videoRef.current.srcObject as MediaStream;
+         s.getTracks().forEach(t => t.stop());
          videoRef.current.srcObject = null;
       }
       
@@ -675,9 +650,9 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
           if(rt.gifAnim) try{ rt.gifAnim.stop(); }catch(e){}
       });
     };
-  }, []); // Intentionally empty dependency array to run once (or twice in strict mode)
+  }, []); 
 
-  // ... (Rest of the component remains same)
+  // ... (Interaction handlers remain same)
 
   // Mouse Interaction Implementation
   const handleMouseDown = (e: React.MouseEvent) => {
