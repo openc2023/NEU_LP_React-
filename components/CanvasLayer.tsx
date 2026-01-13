@@ -48,9 +48,14 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
   const lastAnalyzeRef = useRef<number>(0);
   const nextAnalyzeDueRef = useRef<number>(0);
   const draggingRef = useRef<{active: boolean, offset: Point}>({ active: false, offset: {x:0, y:0} });
-  const pulseRef = useRef<number>(0); // For global pulse animation
-  const requestRef = useRef<number>(0); // RequestAnimationFrame ID
+  const pulseRef = useRef<number>(0); 
+  const requestRef = useRef<number>(0); 
+  const isAnalyzingRef = useRef<boolean>(false);
   
+  // Camera Streams
+  const activeStreamRef = useRef<MediaStream | null>(null);
+  const handsRef = useRef<any>(null);
+
   // Mapping State
   const [draggingPointIndex, setDraggingPointIndex] = useState<number | null>(null);
   
@@ -147,7 +152,6 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
   // --------------- Logic: Geometry & Physics ---------------- //
 
   const updateCirclePhysics = (tip: Point | null, now: number) => {
-    // Skip interaction physics if we are editing the map
     if (settingsRef.current.isMappingEdit) return;
 
     pulseRef.current = (Math.sin(now / 300) + 1) * 0.5;
@@ -241,15 +245,15 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
     const bgImg = backgroundImageRef.current;
     const s = settingsRef.current;
     
-    // 1. Draw Background (Color or Image)
-    ctx.fillStyle = s.backgroundColor || '#0b0f14';
-    ctx.fillRect(0, 0, width, height);
-
+    // Clear / Draw Background
     if (bgImg) {
         ctx.drawImage(bgImg, 0, 0, width, height);
+    } else {
+        ctx.fillStyle = s.backgroundColor || '#0b0f14';
+        ctx.fillRect(0, 0, width, height);
     }
     
-    // 2. Draw Camera Feed (if enabled)
+    // Draw Camera Feed if enabled
     if (s.showCamera) {
       ctx.save();
       if (s.mirrorView) {
@@ -260,7 +264,6 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
       ctx.restore();
     }
 
-    // 3. Draw Circles
     ctx.save();
     
     [...circlesRef.current].forEach(c => {
@@ -335,7 +338,6 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
 
     ctx.restore();
 
-    // 4. Draw Skeleton
     if (landmarks && s.drawSkeleton) {
         if (window.drawConnectors && window.drawLandmarks && window.Hands) {
             ctx.save();
@@ -364,7 +366,6 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
         }
     }
 
-    // 5. Draw Tip Ring
     if (tip) {
         ctx.save();
         const rOuter = 14, rInner = 9;
@@ -385,7 +386,6 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
         ctx.restore();
     }
 
-    // 6. Mapping Editor Handles
     if (s.isMappingEdit) {
         const points = s.mappingPoints;
         
@@ -425,12 +425,57 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
     }
   };
 
-  // --------------- Initialization: MediaPipe & Camera ---------------- //
+  // --------------- Initialization: MediaPipe & Frame Loop ---------------- //
 
   useEffect(() => {
-    let hands: any = null;
-    let stream: MediaStream | null = null;
     let isMounted = true; 
+
+    // Init Hands
+    if (window.Hands && !handsRef.current) {
+        try {
+            handsRef.current = new window.Hands({
+                locateFile: (file: string) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+            });
+            handsRef.current.setOptions({
+                maxNumHands: 2, 
+                modelComplexity: 1,
+                minDetectionConfidence: 0.3,
+                minTrackingConfidence: 0.3,
+                selfieMode: settings.mirrorView
+            });
+            handsRef.current.onResults((results: any) => {
+                 if (!isMounted) return;
+                 // Mark analysis as done
+                 isAnalyzingRef.current = false;
+                 
+                 const width = canvasRef.current?.width || 800;
+                 const height = canvasRef.current?.height || 600;
+
+                 if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                    const rawLms = results.multiHandLandmarks[0].map((p: any) => ({x: p.x, y: p.y}));
+                    const pixelLms = rawLms.map((p: any) => ({x: p.x * width, y: p.y * height}));
+                    const smoothLms = smoothLandmarks(prevLmsRef.current, pixelLms, SMOOTH_ALPHA);
+                    prevLmsRef.current = smoothLms;
+                    
+                    const rawTip = smoothLms[INDEX_TIP];
+                    const tip = smoothPoint(prevTipRef.current, rawTip, 0.5);
+                    prevTipRef.current = tip;
+                    holdLeftRef.current = HOLD_FRAMES;
+                 } else if (holdLeftRef.current > 0 && prevTipRef.current) {
+                    holdLeftRef.current--;
+                 } else {
+                    prevTipRef.current = null;
+                    prevLmsRef.current = null;
+                 }
+                 
+                 const now = performance.now();
+                 const analyzeCost = now - lastAnalyzeRef.current;
+                 onStatsUpdate(`Display:${width}x${height} FPS:~${settingsRef.current.analysisFPS} Cost:${analyzeCost.toFixed(1)}ms`);
+            });
+        } catch (e) {
+            console.error("Failed to init hands", e);
+        }
+    }
 
     // Frame processing loop
     const frameLoop = async () => {
@@ -438,31 +483,30 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
         const now = performance.now();
         const s = settingsRef.current;
         
-        // 1. Process Video Frame
+        // 1. Calculate Dimensions
+        let targetW = s.baseShortSide;
+        let targetH = s.baseShortSide;
+        const [aw, ah] = s.useCustomAspect ? s.aspect : s.aspect;
+        
+        if (aw > ah) { targetW = Math.round(targetH * (aw/ah)); } 
+        else { targetH = Math.round(targetW * (ah/aw)); }
+
+        // Ensure Canvas Sizes
+        const feedCv = feedCanvasRef.current;
+        if (feedCv.width !== targetW || feedCv.height !== targetH) {
+           feedCv.width = targetW;
+           feedCv.height = targetH;
+        }
+        if (canvasRef.current && (canvasRef.current.width !== targetW || canvasRef.current.height !== targetH)) {
+           canvasRef.current.width = targetW;
+           canvasRef.current.height = targetH;
+        }
+
+        // 2. Process Video Frame
         if (videoRef.current && videoRef.current.readyState >= 2) {
             const video = videoRef.current;
-            const feedCv = feedCanvasRef.current;
             const ctxFeed = feedCv.getContext('2d', { alpha: false })!;
             
-            // Calculate Aspect Ratio logic
-            let targetW = s.baseShortSide;
-            let targetH = s.baseShortSide;
-            const [aw, ah] = s.useCustomAspect ? s.aspect : s.aspect;
-            
-            if (aw > ah) { targetW = Math.round(targetH * (aw/ah)); } 
-            else { targetH = Math.round(targetW * (ah/aw)); }
-
-            // Resize offscreen canvas if needed
-            if (feedCv.width !== targetW || feedCv.height !== targetH) {
-               feedCv.width = targetW;
-               feedCv.height = targetH;
-               if(canvasRef.current) {
-                   canvasRef.current.width = targetW;
-                   canvasRef.current.height = targetH;
-               }
-            }
-
-            // Draw Video transformed
             const vW = video.videoWidth;
             const vH = video.videoHeight;
             const scale = Math.max(targetW / vW, targetH / vH) * s.scale;
@@ -470,19 +514,22 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
             const y = (targetH - vH * scale) / 2;
 
             ctxFeed.save();
-            ctxFeed.clearRect(0,0,targetW,targetH);
+            // Ensure clear
+            ctxFeed.fillStyle = '#000000';
+            ctxFeed.fillRect(0,0,targetW,targetH);
+            
             ctxFeed.translate(targetW/2, targetH/2);
             ctxFeed.rotate(s.rotationDeg * Math.PI / 180);
             ctxFeed.translate(-targetW/2, -targetH/2);
             ctxFeed.drawImage(video, x, y, vW * scale, vH * scale);
             ctxFeed.restore();
 
-            // 2. AI Analysis Throttle
-            if (hands && now >= nextAnalyzeDueRef.current) {
+            // 3. AI Analysis Throttle (Non-blocking)
+            if (handsRef.current && !isAnalyzingRef.current && now >= nextAnalyzeDueRef.current) {
                lastAnalyzeRef.current = now;
                nextAnalyzeDueRef.current = now + (1000 / s.analysisFPS);
-
-               // Downscale for analysis
+               
+               // Prepare Low-Res Analysis Frame
                const anaCv = analysisCanvasRef.current;
                const anaShort = s.analysisShortSide;
                const scaleFactor = Math.min(1, anaShort / Math.min(targetW, targetH));
@@ -495,11 +542,25 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
                const anaCtx = anaCv.getContext('2d', { alpha: false, willReadFrequently: true })!;
                anaCtx.drawImage(feedCv, 0, 0, anaW, anaH);
                
-               await hands.send({ image: anaCv });
+               // Dynamic options update
+               if (handsRef.current.setOptions) {
+                   handsRef.current.setOptions({ 
+                       maxNumHands: s.maxHands,
+                       selfieMode: s.mirrorView 
+                   });
+               }
+               
+               // Mark as busy and send
+               isAnalyzingRef.current = true;
+               handsRef.current.send({ image: anaCv }).catch(() => {
+                   isAnalyzingRef.current = false;
+               });
             } 
-            
-            // 3. Draw UI (always, even if AI didn't run this frame)
-            const ctx = canvasRef.current!.getContext('2d')!;
+        }
+
+        // 4. Draw UI (Always draw, even if video isn't ready)
+        if (canvasRef.current) {
+            const ctx = canvasRef.current.getContext('2d')!;
             updateCirclePhysics(prevTipRef.current, now); 
             
             const lmsToDraw = prevTipRef.current && holdLeftRef.current > 0 && prevLmsRef.current 
@@ -507,59 +568,46 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
                 : null;
 
             draw(ctx, targetW, targetH, lmsToDraw, prevTipRef.current);
-
-        } else {
-             // If video not ready, just draw physics/UI
-             if (canvasRef.current) {
-                const ctx = canvasRef.current.getContext('2d')!;
-                updateCirclePhysics(prevTipRef.current, now);
-                draw(ctx, canvasRef.current.width, canvasRef.current.height, null, null);
-             }
         }
 
         requestRef.current = requestAnimationFrame(frameLoop);
     };
 
-    const onResults = (results: any) => {
-      if (!isMounted) return;
-      const width = canvasRef.current?.width || 800;
-      const height = canvasRef.current?.height || 600;
+    requestRef.current = requestAnimationFrame(frameLoop);
 
-      // Process Landmarks
-      if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
-        const rawLms = results.multiHandLandmarks[0].map((p: any) => ({x: p.x, y: p.y}));
-        const pixelLms = rawLms.map((p: any) => ({x: p.x * width, y: p.y * height}));
-        const smoothLms = smoothLandmarks(prevLmsRef.current, pixelLms, SMOOTH_ALPHA);
-        prevLmsRef.current = smoothLms;
-        
-        const rawTip = smoothLms[INDEX_TIP];
-        const tip = smoothPoint(prevTipRef.current, rawTip, 0.5);
-        prevTipRef.current = tip;
-        holdLeftRef.current = HOLD_FRAMES;
-      } else if (holdLeftRef.current > 0 && prevTipRef.current) {
-        holdLeftRef.current--;
-      } else {
-        prevTipRef.current = null;
-        prevLmsRef.current = null;
+    return () => {
+      isMounted = false;
+      cancelAnimationFrame(requestRef.current);
+      if (handsRef.current) {
+          try { handsRef.current.close(); } catch(e) {}
+          handsRef.current = null;
       }
-      
-      const now = performance.now();
-      const analyzeCost = now - lastAnalyzeRef.current;
-      onStatsUpdate(`Display:${width}x${height} FPS:~${settingsRef.current.analysisFPS} Cost:${analyzeCost.toFixed(1)}ms`);
     };
+  }, []); // Only on mount
 
-    const setupCamera = async (retryCount = 0) => {
+  // --------------- Effect: Camera Stream Management ---------------- //
+  const { deviceId } = settings;
+
+  useEffect(() => {
+    let isMounted = true;
+    let retryTimer: any = null;
+
+    const startCamera = async (attempt = 0) => {
         if (!isMounted) return;
+
+        // Cleanup existing stream
+        if (activeStreamRef.current) {
+            activeStreamRef.current.getTracks().forEach(t => t.stop());
+            activeStreamRef.current = null;
+        }
+        
+        // Note: We do NOT stop the render loop here. The video element source is swapped.
         
         try {
-            // Stop existing tracks if any
-            if (stream) {
-                stream.getTracks().forEach(track => track.stop());
-            }
-
+            console.log(`Swapping Camera (Attempt ${attempt+1}). Device: ${deviceId || 'Default'}`);
             const constraints = {
                 video: {
-                    deviceId: settingsRef.current.deviceId ? { exact: settingsRef.current.deviceId } : undefined,
+                    deviceId: deviceId ? { exact: deviceId } : undefined,
                     width: { ideal: 1280 },
                     height: { ideal: 720 },
                     facingMode: 'user'
@@ -567,90 +615,47 @@ const CanvasLayer: React.FC<CanvasLayerProps> = ({
                 audio: false
             };
             
-            console.log(`Requesting camera (Attempt ${retryCount + 1})...`);
-            stream = await navigator.mediaDevices.getUserMedia(constraints);
+            const stream = await navigator.mediaDevices.getUserMedia(constraints);
             
+            if (!isMounted) {
+                stream.getTracks().forEach(t => t.stop());
+                return;
+            }
+
+            activeStreamRef.current = stream;
             if (videoRef.current) {
                 videoRef.current.srcObject = stream;
                 await videoRef.current.play();
-                console.log("Camera started successfully");
-                
-                // Start Loop
-                requestRef.current = requestAnimationFrame(frameLoop);
+                console.log("Camera swapped successfully");
             }
-        } catch (err: any) {
-             console.warn(`Camera start failed (Attempt ${retryCount + 1}):`, err);
-             
-             const isDeviceBusy = err.name === 'NotReadableError' || err.name === 'NotAllowedError' || err.message?.includes('Device in use');
 
-             if (isDeviceBusy && retryCount < 10) {
-                 const delay = 1000 + (retryCount * 1000); 
-                 console.log(`Retrying in ${delay}ms...`);
-                 onStatsUpdate(`Camera Busy... Retry ${retryCount+1}/10`);
-                 setTimeout(() => setupCamera(retryCount + 1), delay);
+        } catch (err: any) {
+             console.warn(`Camera swap failed (Attempt ${attempt + 1}):`, err);
+             const isBusy = err.name === 'NotReadableError' || err.name === 'NotAllowedError' || err.message?.includes('Device in use');
+
+             if (isMounted && isBusy && attempt < 10) {
+                 const delay = 1000 + (attempt * 1000);
+                 onStatsUpdate(`Camera Busy. Retry ${attempt+1}/10...`);
+                 retryTimer = setTimeout(() => startCamera(attempt + 1), delay);
              } else {
-                 onStatsUpdate("Error: Camera Busy/Blocked");
+                 onStatsUpdate("Error: Camera Busy or Unavailable");
              }
         }
     };
-
-    const init = async () => {
-      if (!isMounted) return;
-
-      if (!window.Hands) {
-        console.error("MediaPipe Hands script not loaded");
-        return;
-      }
-
-      // Init Hands
-      try {
-        hands = new window.Hands({
-            locateFile: (file: string) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
-        });
-        hands.setOptions({
-            maxNumHands: settingsRef.current.maxHands,
-            modelComplexity: 1,
-            minDetectionConfidence: 0.3,
-            minTrackingConfidence: 0.3,
-            selfieMode: settingsRef.current.mirrorView
-        });
-        hands.onResults(onResults);
-      } catch (e) {
-          console.error("Failed to initialize MediaPipe Hands", e);
-      }
-
-      // Init Camera
-      setupCamera();
-    };
-
-    // Initial Delay extended to avoid React StrictMode conflicts
-    const t = setTimeout(init, 800);
+    
+    // Initial delay to allow previous stream to release
+    retryTimer = setTimeout(() => startCamera(0), 100);
 
     return () => {
-      isMounted = false;
-      clearTimeout(t);
-      cancelAnimationFrame(requestRef.current);
-      
-      if (hands) {
-          try { hands.close(); } catch(e) {}
-      }
-      
-      // Strict Stream Cleanup
-      if (stream) {
-         stream.getTracks().forEach(t => t.stop());
-      }
-      if (videoRef.current && videoRef.current.srcObject) {
-         const s = videoRef.current.srcObject as MediaStream;
-         s.getTracks().forEach(t => t.stop());
-         videoRef.current.srcObject = null;
-      }
-      
-      runtimeRef.current.forEach(rt => {
-          if(rt.audioEl) rt.audioEl.pause();
-          if(rt.gifAnim) try{ rt.gifAnim.stop(); }catch(e){}
-      });
+        isMounted = false;
+        clearTimeout(retryTimer);
+        // Only stop tracks on unmount of this effect (device change or component unmount)
+        if (activeStreamRef.current) {
+            activeStreamRef.current.getTracks().forEach(t => t.stop());
+            activeStreamRef.current = null;
+        }
     };
-  }, []); 
+  }, [deviceId]);
 
   // ... (Interaction handlers remain same)
 
