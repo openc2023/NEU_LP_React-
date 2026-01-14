@@ -21,7 +21,7 @@ export const PanelHeader = ({ title, version }: { title: string; version?: strin
 
 // --- Inputs ---
 
-interface InputProps extends React.ComponentProps<'input'> {
+interface InputProps extends React.InputHTMLAttributes<HTMLInputElement> {
   label?: string;
   rightLabel?: string;
 }
@@ -51,8 +51,9 @@ export const TextInput = React.forwardRef<HTMLInputElement, InputProps>(({ class
     {...props}
   />
 ));
+TextInput.displayName = "TextInput";
 
-export const Select = ({ className, children, ...props }: React.ComponentProps<'select'>) => (
+export const Select = ({ className, children, ...props }: React.SelectHTMLAttributes<HTMLSelectElement>) => (
   <div className="relative">
     <select
       className={`w-full appearance-none bg-zinc-900/50 border border-white/10 text-zinc-300 text-xs rounded px-3 py-2 pr-8
@@ -79,7 +80,7 @@ export const Toggle = ({ label, checked, onChange }: { label: string; checked: b
   </label>
 );
 
-interface ButtonProps extends React.ComponentProps<'button'> {
+interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
   variant?: 'primary' | 'secondary' | 'danger' | 'ghost';
   icon?: React.ReactNode;
 }

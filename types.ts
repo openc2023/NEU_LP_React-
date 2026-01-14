@@ -1,6 +1,15 @@
+
+
 export interface Point {
   x: number;
   y: number;
+  depth?: number; // Depth in mm, optional
+}
+
+export interface RemoteHand {
+    landmarks: { x: number; y: number; z: number; depth_mm?: number }[];
+    gesture?: string;
+    score?: number;
 }
 
 export interface CircleConfig {
@@ -51,6 +60,11 @@ export interface AppSettings {
   // Camera Selection
   cameraType: 'standard' | 'professional';
   deviceId: string;
+  // Professional / WebSocket
+  wsUrl: string;
+  cameraIp: string; // For Femto Mega Ethernet
+  depthTriggerMm: number; // Z-axis threshold in mm
+  streamMode: 'color' | 'depth'; // NEW: Stream visualization mode
   // Visuals
   backgroundColor: string;
   // Projection / Geometry
@@ -74,6 +88,10 @@ export const DEFAULT_SETTINGS: AppSettings = {
   useCustomAspect: false,
   cameraType: 'standard',
   deviceId: '',
+  wsUrl: 'ws://localhost:8765',
+  cameraIp: '', // Empty means USB mode
+  depthTriggerMm: 1800, // Trigger when hand is closer than 1.8m (Increased for distance)
+  streamMode: 'color', // Default to color stream
   backgroundColor: '#0b0f14',
   borderRadius: 16,
   mappingEnabled: false,

@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import CanvasLayer from './components/CanvasLayer';
 import ControlPanel from './components/ControlPanel';
+import { BridgeManager } from './components/BridgeManager';
 import { AppSettings, CircleConfig, DEFAULT_SETTINGS } from './types';
 
 const App: React.FC = () => {
@@ -9,6 +10,9 @@ const App: React.FC = () => {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [backgroundImage, setBackgroundImage] = useState<HTMLImageElement | null>(null);
   const [perfStats, setPerfStats] = useState("-");
+  
+  // Lifted state for Bridge Manager to control CanvasLayer pausing
+  const [showBridge, setShowBridge] = useState(false);
 
   // Load from LocalStorage on Mount
   useEffect(() => {
@@ -129,6 +133,7 @@ const App: React.FC = () => {
         setEditingId={setEditingId}
         backgroundImage={backgroundImage}
         onStatsUpdate={setPerfStats}
+        isPaused={showBridge} // Pause camera when bridge is open to prevent WS conflict
       />
       
       <ControlPanel 
@@ -144,6 +149,13 @@ const App: React.FC = () => {
         backgroundImage={backgroundImage}
         setBackgroundImage={setBackgroundImage}
         performanceStats={perfStats}
+        onOpenBridge={() => setShowBridge(true)}
+      />
+
+      <BridgeManager 
+        isOpen={showBridge} 
+        onClose={() => setShowBridge(false)} 
+        wsUrl={settings.wsUrl}
       />
     </div>
   );

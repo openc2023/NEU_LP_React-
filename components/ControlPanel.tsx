@@ -1,3 +1,4 @@
+
 import React, { useRef, useState, useEffect } from 'react';
 import { AppSettings, CircleConfig } from '../types';
 import { generateId, generateMeshPoints } from '../utils';
@@ -19,6 +20,7 @@ interface ControlPanelProps {
   backgroundImage: HTMLImageElement | null;
   setBackgroundImage: (img: HTMLImageElement | null) => void;
   performanceStats: string;
+  onOpenBridge: () => void;
 }
 
 const ControlPanel: React.FC<ControlPanelProps> = ({
@@ -33,7 +35,8 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
   onSaveDefault,
   setBackgroundImage,
   backgroundImage,
-  performanceStats
+  performanceStats,
+  onOpenBridge
 }) => {
   const [isOpen, setIsOpen] = useState(true);
   const [showGlobalSettings, setShowGlobalSettings] = useState(true);
@@ -167,13 +170,13 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
                                 onClick={() => updateSetting('cameraType', 'standard')}
                                 className={`flex-1 py-1.5 text-[10px] font-medium rounded transition-all ${settings.cameraType === 'standard' ? 'bg-zinc-800 text-white shadow-sm' : 'text-zinc-500 hover:text-zinc-300'}`}
                             >
-                                Standard
+                                Webcam (USB)
                             </button>
                             <button 
                                 onClick={() => updateSetting('cameraType', 'professional')}
-                                className={`flex-1 py-1.5 text-[10px] font-medium rounded transition-all ${settings.cameraType === 'professional' ? 'bg-zinc-800 text-white shadow-sm' : 'text-zinc-500 hover:text-zinc-300'}`}
+                                className={`flex-1 py-1.5 text-[10px] font-medium rounded transition-all ${settings.cameraType === 'professional' ? 'bg-cyan-900 text-cyan-100 shadow-sm border border-cyan-700' : 'text-zinc-500 hover:text-zinc-300'}`}
                             >
-                                Femto Bolt
+                                Orbbec Bridge
                             </button>
                         </div>
                         {settings.cameraType === 'standard' && (
@@ -186,6 +189,65 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
                                     <option key={d.deviceId} value={d.deviceId}>{d.label || `Camera ${d.deviceId.slice(0,5)}...`}</option>
                                 ))}
                             </Select>
+                        )}
+                        {settings.cameraType === 'professional' && (
+                            <div className="bg-cyan-900/20 p-2 rounded border border-cyan-800/50 space-y-2">
+                                <div className="grid grid-cols-3 gap-2">
+                                    <div className="col-span-2">
+                                        <TextInput 
+                                            label="WS URL" 
+                                            value={settings.wsUrl} 
+                                            onChange={(e) => updateSetting('wsUrl', e.target.value)} 
+                                            placeholder="ws://localhost:8765"
+                                        />
+                                    </div>
+                                    <div className="col-span-1">
+                                        <TextInput 
+                                            label="Device IP" 
+                                            value={settings.cameraIp} 
+                                            onChange={(e) => updateSetting('cameraIp', e.target.value)} 
+                                            placeholder="USB"
+                                            title="Leave empty for USB connection"
+                                        />
+                                    </div>
+                                </div>
+                                
+                                <div className="flex gap-2 items-center justify-between">
+                                    <span className="text-[10px] text-zinc-400">Stream Mode:</span>
+                                    <div className="flex bg-black/40 p-0.5 rounded border border-white/5">
+                                        <button 
+                                            onClick={() => updateSetting('streamMode', 'color')}
+                                            className={`px-3 py-1 text-[9px] rounded transition-all ${settings.streamMode === 'color' ? 'bg-cyan-700 text-white' : 'text-zinc-500 hover:text-zinc-300'}`}
+                                        >
+                                            RGB
+                                        </button>
+                                        <button 
+                                            onClick={() => updateSetting('streamMode', 'depth')}
+                                            className={`px-3 py-1 text-[9px] rounded transition-all ${settings.streamMode === 'depth' ? 'bg-purple-700 text-white' : 'text-zinc-500 hover:text-zinc-300'}`}
+                                        >
+                                            DEPTH
+                                        </button>
+                                    </div>
+                                </div>
+
+                                <Slider 
+                                    label="Z-Trigger (mm)" 
+                                    rightLabel={`${settings.depthTriggerMm}mm`} 
+                                    min="200" max="2500" step="50"
+                                    value={settings.depthTriggerMm} 
+                                    onChange={(e) => updateSetting('depthTriggerMm', Number(e.target.value))} 
+                                />
+                                <div className="text-[10px] text-cyan-400/50 font-mono text-center">
+                                    Supports Femto Bolt & Mega
+                                </div>
+                                <Button 
+                                    onClick={onOpenBridge}
+                                    className="w-full text-[10px] !py-1 bg-cyan-800 hover:bg-cyan-700 border-cyan-600"
+                                    icon={<span className="text-[9px]">⚡</span>}
+                                >
+                                    OPEN MIDDLEWARE TERMINAL
+                                </Button>
+                            </div>
                         )}
                     </div>
 
