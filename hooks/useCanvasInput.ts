@@ -1,5 +1,4 @@
-
-import { useRef, useState } from 'react';
+import React, { useRef, useState } from 'react';
 import { AppSettings, CircleConfig, Point } from '../types';
 
 interface UseCanvasInputProps {

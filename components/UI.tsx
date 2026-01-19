@@ -1,13 +1,16 @@
+
 import React from 'react';
 
 // --- Typography & Layout ---
 
-export const SectionLabel = ({ children }: { children: React.ReactNode }) => (
+// Added explicit React.FC type to ensure children are recognized correctly
+export const SectionLabel: React.FC<{ children: React.ReactNode }> = ({ children }) => (
   <div className="font-tech text-[11px] uppercase tracking-[0.15em] text-cyan-500/80 mb-2 border-l-2 border-cyan-500/30 pl-2">
     {children}
   </div>
 );
 
+// Added explicit title and version typing
 export const PanelHeader = ({ title, version }: { title: string; version?: string }) => (
   <div className="flex items-center justify-between mb-4 pb-3 border-b border-white/10">
     <h3 className="font-tech text-xl font-bold text-white tracking-wide">{title}</h3>
@@ -21,7 +24,9 @@ export const PanelHeader = ({ title, version }: { title: string; version?: strin
 
 // --- Inputs ---
 
-interface InputProps extends React.InputHTMLAttributes<HTMLInputElement> {
+// Fix: Use ComponentPropsWithoutRef to ensure all standard input attributes (value, min, max, etc.) 
+// are correctly inherited and recognized by the compiler.
+interface InputProps extends React.ComponentPropsWithoutRef<'input'> {
   label?: string;
   rightLabel?: string;
 }
@@ -80,9 +85,14 @@ export const Toggle = ({ label, checked, onChange }: { label: string; checked: b
   </label>
 );
 
+// Explicitly added commonly used button attributes to satisfy the compiler
 interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
   variant?: 'primary' | 'secondary' | 'danger' | 'ghost';
   icon?: React.ReactNode;
+  className?: string;
+  onClick?: React.MouseEventHandler<HTMLButtonElement>;
+  disabled?: boolean;
+  children?: React.ReactNode;
 }
 
 export const Button = ({ children, variant = 'secondary', icon, className, ...props }: ButtonProps) => {
